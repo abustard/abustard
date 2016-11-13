@@ -1,0 +1,178 @@
+---
+title: "Loading geology polygons"
+author: Aaron Bustard
+layout: post
+published: true
+status: publish
+draft: false
+tags: R geology maps
+---
+ 
+
+ 
+ 
+For this project, I'll be using geologic mapping data from the New Brunswick Department of Minerals and Petroleum. We'll be using data from MP 2005-36, which is 1:50 000 scale mapping of the Fosterville area in south-western New Brunswick [(available here)](http://dnr-mrn.gnb.ca/ParisWeb/PublicationDetails.aspx?Num=MP%202005-36&lang=e). You'll want to scroll to the bottom of the page and click the "List Digital Files" button, then download the zipped folder titled "2005-36_shp.zip". Extract the contents of this file to your working directory if you're following along. The files I'm going to be plotting here are the "geology" and "Faults" shapefiles.
+ 
+For this project we need to load `ggplot2` to plot the results, `rgdal` and `maptools` to handle the shapefiles, and `dplyr` for general data manipulation.
+ 
+
+{% highlight r %}
+## Load required packages
+library(ggplot2)
+library(rgdal)
+library(dplyr)
+library(maptools)
+{% endhighlight %}
+ 
+### Load the shapefiles
+ 
+The first step is to load the shapefile containing the geology data into R using `readOGR()` from the `rgdal` package. `readOGR()` is also able to read file geodatabases among other things.
+ 
+
+{% highlight r %}
+## in readOGR() dsn is the file path. "." indicates it's in the working directory
+geology <- readOGR(dsn = ".", layer = "geology") 
+{% endhighlight %}
+
+
+
+{% highlight text %}
+## OGR data source with driver: ESRI Shapefile 
+## Source: ".", layer: "geology"
+## with 354 features
+## It has 11 fields
+{% endhighlight %}
+ 
+### Convert to data frame
+ 
+R can plot this result as it is now (it should be a "SpatialPolygonsDataFrame" when first loaded), but if we want to plot it using `ggplot2`, we need to convert it into a format that `ggplot2` can understand (a data frame). `fortify()` can do this, but we lose the attribute data. The [ggplot2 wiki](https://github.com/tidyverse/ggplot2/wiki/plotting-polygon-shapefileslink) describes how to do this conversion while maintaining attribute data.
+ 
+
+{% highlight r %}
+## Set coordinate system for geology layer (spatialrefernce.org), NB double stereographic
+proj4string(geology) <- "+proj=sterea +lat_0=46.5 +lon_0=-66.5 +k=0.999912 +x_0=2500000 +y_0=7500000 +ellps=GRS80 +units=m +no_defs"
+ 
+## Transform coordinates to NAD83 Zone 19 (EPSG code used)
+geology <- spTransform(geology, CRS("+init=epsg:2960"))
+ 
+ 
+geology@data$id <-  rownames(geology@data)
+geology.points <-  fortify(geology, region="id")
+geology.df <-  full_join(geology.points, geology@data, by="id")
+geology@data$id <-  rownames(geology@data)
+geology.points <-  fortify(geology, region="id")
+ 
+## Remove polygons that don't have colour information (step not necesarilly required)
+geology.df <-  full_join(geology.points, geology@data, by="id") %>% filter(!is.na(RGB_Value))
+ 
+## Check to see what fields we have
+colnames(geology.df)
+{% endhighlight %}
+
+
+
+{% highlight text %}
+##  [1] "long"       "lat"        "order"      "hole"       "piece"     
+##  [6] "id"         "group"      "GROUPS"     "DESCRIPTIO" "AGE"       
+## [11] "Comments"   "AGE.1"      "RGB_Value"  "Lexicon_Id" "Key"       
+## [16] "Feature"    "Perimeter"  "Area"
+{% endhighlight %}
+ 
+### A basic plot
+ 
+Now that we have the geology in a data frame (`geology.df`), we can plot it with `ggplot()` as you would with anything else. Unfortunately, at this stage the colours will be automatically assigned and the result will look something like this:
+ 
+
+{% highlight r %}
+## Basic plot, automatic colouring
+p <- ggplot(data = geology.df, aes(x = long, y = lat)) + 
+  geom_polygon(aes(fill = DESCRIPTIO, group = group), colour = "Black") +
+  coord_equal() +
+  theme(legend.position = "none")
+p
+{% endhighlight %}
+
+![plot of chunk basic plot](/figures/basic plot-1.png)
+ 
+ 
+### Adding proper colours and a legend
+ 
+The geology map above is ok, but we really want the colours to match up with their standard values. The shapefiles from the NB government are great because they include a field with the correct RGB value. If you're working with other data, you can add a similar field to your shapefile, or see if a look-up table for the geology exists (the British Columbia Geological Survey's digital geology has one of these, and that will be covered in a later post). However, we need to convert the RGB to a hex colour for `ggplot2` to easily detect this. Fortunately, the `rgb()` function does exactly this. To get the RGB data into the correct format we need, I use `gsub()` and regular expressions to extract the values. An explanation of regular expressions is a bit beyond the scope of this guide, but they're basically a way to make a structured search of strings.
+ 
+The following bit of code makes a new field for the colour information ("RGBcode"), then assigns a colour scale based on the levels in this field (the `scale_shape_manual()` portion of the following code). I also use regular expressions to extract a portion of the description field and use it as the labels in the legend.
+ 
+
+{% highlight r %}
+## Use Regular Expressions to extract the red, green, and blue values from the RGB field
+geology.df$R <- gsub("^RGB=\\((.{1,3}),(.{1,3}),(.{1,3})\\)$", "\\1", geology.df$RGB_Value)
+geology.df$G <- gsub("^RGB=\\((.{1,3}),(.{1,3}),(.{1,3})\\)$", "\\2", geology.df$RGB_Value)
+geology.df$B <- gsub("^RGB=\\((.{1,3}),(.{1,3}),(.{1,3})\\)$", "\\3", geology.df$RGB_Value)
+ 
+## Convert RGB values to hex colour so ggplot2 can handle
+geology.df$RGBcode <- rgb(geology.df$R, geology.df$G, geology.df$B, maxColorValue = 255) %>% as.factor()
+ 
+## Plot geology polygons with colours based on RGB code
+p <- ggplot(data = geology.df, aes(x = long, y = lat)) + 
+  geom_polygon(aes(fill = RGBcode, group = group), colour = "Black") +
+  scale_fill_manual(values = levels(geology.df$RGBcode), 
+                    breaks = geology.df$RGBcode, 
+                    labels = gsub("^(.*)\\(.*$","\\1", geology.df$DESCRIPTIO)) + ## Regex used to select everything before '('
+  coord_equal() +
+  theme(legend.text = element_text(size = 6)) +
+  labs(fill = "Unit")
+p
+{% endhighlight %}
+
+![plot of chunk corect colours and legend](/figures/corect colours and legend-1.png)
+ 
+### Adding other layers
+ 
+That looks pretty good, and the appearance of the plot can now be adjusted to your liking. One last thing to add to the plot is faults, which are also included with the mapping. In this case, we simply load the shapefile, reproject it into our selected coordinate reference, and then convert it to a data frame using `fortify()` from the `ggplot2` package. Additional layers can be added as needed.
+ 
+
+{% highlight r %}
+## Load shapefile and assign projection
+faults <- readOGR(".", "Faults")
+{% endhighlight %}
+
+
+
+{% highlight text %}
+## OGR data source with driver: ESRI Shapefile 
+## Source: ".", layer: "Faults"
+## with 166 features
+## It has 7 fields
+{% endhighlight %}
+
+
+
+{% highlight r %}
+proj4string(faults) <- "+proj=sterea +lat_0=46.5 +lon_0=-66.5 +k=0.999912 +x_0=2500000 +y_0=7500000 +ellps=GRS80 +units=m +no_defs"
+ 
+## Transform coordinates to NAD83 Zone 19 (EPSG code used)
+faults <- spTransform(faults, CRS("+init=epsg:2960")) %>% fortify()
+colnames(faults)
+{% endhighlight %}
+
+
+
+{% highlight text %}
+## [1] "long"  "lat"   "order" "piece" "id"    "group"
+{% endhighlight %}
+
+
+
+{% highlight r %}
+## Generate the plot
+p <- p + geom_path(data = faults, aes(x = long, y = lat, group = group), size = 1) + 
+  coord_equal() +
+  theme(legend.position = "none") ## Remove the legend to make map bigger
+p
+{% endhighlight %}
+
+![plot of chunk with faults](/figures/with faults-1.png)
+ 
+### Conclusions
+ 
+There you have it, a basic geology map. It still needs work to be included in any type of publication, but it makes for a good base map. Other layers, such as roads/rivers/etc., can be added in much the same way as the faults since they're typically just lines in a shapefile.
+ 
